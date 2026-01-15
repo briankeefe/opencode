@@ -8,7 +8,7 @@ import { BunProc } from "../bun"
 import { Plugin } from "../plugin"
 import { ModelsDev } from "./models"
 import { NamedError } from "@opencode-ai/util/error"
-import { Auth } from "../auth"
+import { Auth, OAUTH_DUMMY_KEY } from "../auth"
 import { Env } from "../env"
 import { Instance } from "../project/instance"
 import { State } from "../project/state"
@@ -115,7 +115,7 @@ export namespace Provider {
       const options: Record<string, any> = headers ? { headers } : {}
 
       if (auth?.type === "oauth") {
-        options.apiKey = Auth.OAUTH_DUMMY_KEY
+        options.apiKey = OAUTH_DUMMY_KEY
         options.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
           const current = await Auth.get("anthropic")
           if (!current || current.type !== "oauth") return fetch(input, init)
