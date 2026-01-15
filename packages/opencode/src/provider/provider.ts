@@ -74,6 +74,35 @@ export namespace Provider {
     options?: Record<string, any>
   }>
 
+  const ANTHROPIC_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+
+  async function refreshAnthropicOauth(auth: Auth.Info & { type: "oauth" }) {
+    if (auth.access && auth.expires >= Date.now()) return auth
+    const response = await fetch("https://console.anthropic.com/v1/oauth/token", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        grant_type: "refresh_token",
+        refresh_token: auth.refresh,
+        client_id: ANTHROPIC_OAUTH_CLIENT_ID,
+      }),
+    })
+    if (!response.ok) {
+      throw new Error(`Token refresh failed: ${response.status}`)
+    }
+    const json = await response.json()
+    const updated = {
+      ...auth,
+      refresh: json.refresh_token,
+      access: json.access_token,
+      expires: Date.now() + json.expires_in * 1000,
+    }
+    await Auth.set("anthropic", updated)
+    return updated
+  }
+
   const CUSTOM_LOADERS: Record<string, CustomLoader> = {
     async anthropic() {
       const auth = await Auth.get("anthropic")
@@ -83,9 +112,159 @@ export namespace Provider {
         betaFlags.unshift("claude-code-20250219")
       }
       const headers = betaFlags.length > 0 ? { "anthropic-beta": betaFlags.join(",") } : undefined
+      const options: Record<string, any> = headers ? { headers } : {}
+
+      if (auth?.type === "oauth") {
+        options.apiKey = Auth.OAUTH_DUMMY_KEY
+        options.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+          const current = await Auth.get("anthropic")
+          if (!current || current.type !== "oauth") return fetch(input, init)
+          const refreshed = await refreshAnthropicOauth(current)
+
+          const requestInit = init ?? {}
+          const requestHeaders = new Headers()
+          if (input instanceof Request) {
+            input.headers.forEach((value, key) => {
+              requestHeaders.set(key, value)
+            })
+          }
+          if (requestInit.headers) {
+            if (requestInit.headers instanceof Headers) {
+              requestInit.headers.forEach((value, key) => {
+                requestHeaders.set(key, value)
+              })
+            } else if (Array.isArray(requestInit.headers)) {
+              for (const [key, value] of requestInit.headers) {
+                if (typeof value !== "undefined") {
+                  requestHeaders.set(key, String(value))
+                }
+              }
+            } else {
+              for (const [key, value] of Object.entries(requestInit.headers)) {
+                if (typeof value !== "undefined") {
+                  requestHeaders.set(key, String(value))
+                }
+              }
+            }
+          }
+
+          const incomingBeta = requestHeaders.get("anthropic-beta") || ""
+          const incomingBetasList = incomingBeta
+            .split(",")
+            .map((b) => b.trim())
+            .filter(Boolean)
+          const includeClaudeCodeBeta = incomingBetasList.includes("claude-code-20250219")
+
+          const mergedBetas = [
+            "oauth-2025-04-20",
+            "interleaved-thinking-2025-05-14",
+            ...(includeClaudeCodeBeta ? ["claude-code-20250219"] : []),
+          ].join(",")
+
+          requestHeaders.set("authorization", `Bearer ${refreshed.access}`)
+          requestHeaders.set("anthropic-beta", mergedBetas)
+          requestHeaders.set("user-agent", "claude-cli/2.1.2 (external, cli)")
+          requestHeaders.delete("x-api-key")
+
+          const TOOL_PREFIX = "mcp_"
+          let body = requestInit.body
+          if (body && typeof body === "string") {
+            try {
+              const parsed = JSON.parse(body)
+
+              if (parsed.system && Array.isArray(parsed.system)) {
+                parsed.system = parsed.system.map((item: any) => {
+                  if (item.type === "text" && item.text) {
+                    return {
+                      ...item,
+                      text: item.text.replace(/OpenCode/g, "Claude Code").replace(/opencode/gi, "Claude"),
+                    }
+                  }
+                  return item
+                })
+              }
+
+              if (parsed.tools && Array.isArray(parsed.tools)) {
+                parsed.tools = parsed.tools.map((tool: any) => ({
+                  ...tool,
+                  name: tool.name ? `${TOOL_PREFIX}${tool.name}` : tool.name,
+                }))
+              }
+              if (parsed.messages && Array.isArray(parsed.messages)) {
+                parsed.messages = parsed.messages.map((msg: any) => {
+                  if (msg.content && Array.isArray(msg.content)) {
+                    msg.content = msg.content.map((block: any) => {
+                      if (block.type === "tool_use" && block.name) {
+                        return { ...block, name: `${TOOL_PREFIX}${block.name}` }
+                      }
+                      return block
+                    })
+                  }
+                  return msg
+                })
+              }
+              body = JSON.stringify(parsed)
+            } catch (e) {
+              // ignore parse errors
+            }
+          }
+
+          let requestInput = input
+          let requestUrl: URL | null = null
+          try {
+            if (typeof input === "string" || input instanceof URL) {
+              requestUrl = new URL(input.toString())
+            } else if (input instanceof Request) {
+              requestUrl = new URL(input.url)
+            }
+          } catch {
+            requestUrl = null
+          }
+
+          if (requestUrl && requestUrl.pathname === "/v1/messages" && !requestUrl.searchParams.has("beta")) {
+            requestUrl.searchParams.set("beta", "true")
+            requestInput = input instanceof Request ? new Request(requestUrl.toString(), input) : requestUrl
+          }
+
+          const response = await fetch(requestInput, {
+            ...requestInit,
+            body,
+            headers: requestHeaders,
+          })
+
+          if (response.body) {
+            const reader = response.body.getReader()
+            const decoder = new TextDecoder()
+            const encoder = new TextEncoder()
+
+            const stream = new ReadableStream({
+              async pull(controller) {
+                const { done, value } = await reader.read()
+                if (done) {
+                  controller.close()
+                  return
+                }
+
+                let text = decoder.decode(value, { stream: true })
+                text = text.replace(/"name"\s*:\s*"mcp_([^"]+)"/g, '"name": "$1"')
+                controller.enqueue(encoder.encode(text))
+              },
+            })
+
+            return new Response(stream, {
+              status: response.status,
+              statusText: response.statusText,
+              headers: response.headers,
+            })
+          }
+
+          return response
+        }
+      }
+
       return {
         autoload: false,
-        options: headers ? { headers } : {},
+        options,
       }
     },
     async opencode(input) {
