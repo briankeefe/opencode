@@ -113,9 +113,17 @@ export namespace Provider {
       }
       const headers = betaFlags.length > 0 ? { "anthropic-beta": betaFlags.join(",") } : undefined
       const options: Record<string, any> = headers ? { headers } : {}
+      const debugOauth = Env.get("OPENCODE_DEBUG_ANTHROPIC_OAUTH")
 
       if (auth?.type === "oauth") {
         options.apiKey = OAUTH_DUMMY_KEY
+        if (debugOauth) {
+          log.info("anthropic oauth setup", {
+            hasAuth: auth.type,
+            includeClaudeCode,
+            hasFetch: true,
+          })
+        }
         options.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
           const current = await Auth.get("anthropic")
           if (!current || current.type !== "oauth") return fetch(input, init)
@@ -224,6 +232,17 @@ export namespace Provider {
           if (requestUrl && requestUrl.pathname === "/v1/messages" && !requestUrl.searchParams.has("beta")) {
             requestUrl.searchParams.set("beta", "true")
             requestInput = input instanceof Request ? new Request(requestUrl.toString(), input) : requestUrl
+          }
+
+          if (debugOauth) {
+            log.info("anthropic oauth request", {
+              url: requestUrl?.toString(),
+              hasAuthorization: requestHeaders.has("authorization"),
+              hasApiKey: requestHeaders.has("x-api-key"),
+              userAgent: requestHeaders.get("user-agent"),
+              beta: requestHeaders.get("anthropic-beta"),
+              bodyHasOpenCode: typeof body === "string" ? body.includes("OpenCode") : undefined,
+            })
           }
 
           const response = await fetch(requestInput, {
