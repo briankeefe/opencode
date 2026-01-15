@@ -11,6 +11,7 @@ import { NamedError } from "@opencode-ai/util/error"
 import { Auth } from "../auth"
 import { Env } from "../env"
 import { Instance } from "../project/instance"
+import { State } from "../project/state"
 import { Flag } from "../flag/flag"
 import { iife } from "@/util/iife"
 
@@ -664,7 +665,7 @@ export namespace Provider {
     }
   }
 
-  const state = Instance.state(async () => {
+  const state = State.create(() => `${Instance.directory}:${Auth.getRevision()}`, async () => {
     using _ = log.time("state")
     const config = await Config.get()
     const modelsDev = await ModelsDev.get()

@@ -56,11 +56,22 @@ export namespace Auth {
     )
   }
 
+  let revision = 0
+
+  export function getRevision() {
+    return revision
+  }
+
+  function bumpRevision() {
+    revision += 1
+  }
+
   export async function set(key: string, info: Info) {
     const file = Bun.file(filepath)
     const data = await all()
     await Bun.write(file, JSON.stringify({ ...data, [key]: info }, null, 2))
     await fs.chmod(file.name!, 0o600)
+    bumpRevision()
   }
 
   export async function remove(key: string) {
@@ -69,5 +80,6 @@ export namespace Auth {
     delete data[key]
     await Bun.write(file, JSON.stringify(data, null, 2))
     await fs.chmod(file.name!, 0o600)
+    bumpRevision()
   }
 }
